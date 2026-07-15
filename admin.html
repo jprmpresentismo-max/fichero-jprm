@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Panel Admin · Fichero JPRM</title>
+<script src="https://unpkg.com/@supabase/supabase-js@2"></script>
+<style>
+  :root{
+    --bg:#0f1720; --panel:#182430; --panel2:#1f2e3c; --line:#2a3a49;
+    --text:#e8edf2; --muted:#8aa0b2; --accent:#3fb8af; --accent2:#e0a336;
+    --danger:#d9534f; --ok:#4caf7d; --radius:14px;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; background:var(--bg); color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+    min-height:100vh; padding:20px; padding-bottom:60px;
+  }
+  h1{font-size:1.1rem; letter-spacing:.04em; text-transform:uppercase; color:var(--muted); margin:0 0 4px;}
+  h2{font-size:1.5rem; margin:0 0 20px;}
+  .card{background:var(--panel); border:1px solid var(--line); border-radius:var(--radius); padding:20px; margin-bottom:16px;}
+  .btn{
+    display:block; width:100%; padding:16px; border-radius:12px; border:none;
+    font-size:1.05rem; font-weight:600; margin-bottom:12px; cursor:pointer;
+    background:var(--accent); color:#08201d;
+  }
+  .btn.secondary{background:var(--panel2); color:var(--text); border:1px solid var(--line);}
+  .btn.warn{background:var(--accent2); color:#3a2500;}
+  .muted{color:var(--muted); font-size:.9rem;}
+  input[type=text], input[type=email], input[type=password]{
+    width:100%; padding:12px; border-radius:10px; border:1px solid var(--line);
+    background:var(--panel2); color:var(--text); margin-bottom:12px; font-size:1rem;
+  }
+  textarea{
+    width:100%; min-height:140px; background:var(--panel2); color:var(--text);
+    border:1px solid var(--line); border-radius:10px; padding:12px;
+    font-family:monospace; font-size:.9rem; margin-bottom:12px;
+  }
+  .item{
+    display:flex; justify-content:space-between; align-items:center;
+    background:var(--panel2); border-radius:10px; padding:10px 14px; margin-bottom:8px;
+    border-left:3px solid var(--accent);
+  }
+  .item small{display:block; color:var(--muted);}
+  .toast{
+    position:fixed; left:20px; right:20px; bottom:20px; padding:14px 18px;
+    border-radius:12px; font-weight:600; text-align:center; z-index:50;
+  }
+  .toast.err{background:var(--danger); color:#fff;}
+  .toast.ok{background:var(--ok); color:#06210f;}
+  .hidden{display:none !important;}
+  .top-nav{display:flex; gap:8px; margin-bottom:18px;}
+  .top-nav button{flex:1; padding:10px; border-radius:10px; border:1px solid var(--line); background:var(--panel); color:var(--muted); font-size:.85rem;}
+  .top-nav button.active{background:var(--accent); color:#08201d; border-color:var(--accent);}
+  code{background:var(--panel2); padding:2px 6px; border-radius:4px; font-size:.85em;}
+  .badge{font-size:.75rem; padding:5px 10px; border-radius:20px; background:var(--ok); color:#06210f; font-weight:700; cursor:pointer; text-align:center;}
+  .badge.off{background:var(--line); color:var(--muted);}
+  .acciones{display:flex; flex-direction:column; gap:6px; align-items:flex-end;}
+</style>
+</head>
+<body>
+
+<h1>JPRM · Junta Médica</h1>
+<h2>Panel de administración</h2>
+
+<!-- ====== CONFIGURACIÓN: completar antes de usar ====== -->
+<script>
+  const SUPABASE_URL = "https://TU-PROYECTO.supabase.co";
+  const SUPABASE_ANON_KEY = "TU-ANON-KEY";
+</script>
+
+<div id="app"></div>
+<div id="toast" class="toast hidden"></div>
+
+<script>
+const supa = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+const app = document.getElementById("app");
+let session = null;
+
+function toast(msg, type="ok"){
+  const t = document.getElementById("toast");
+  t.textContent = msg;
+  t.className = "toast " + type;
+  setTimeout(()=> t.classList.add("hidden"), 3200);
+}
+
+function debounce(fn, ms){
+  let temp;
+  return (...args) => { clearTimeout(temp); temp = setTimeout(() => fn(...args), ms); };
+}
+
+function codigoUnico(){
+  return "F-" + Math.random().toString(36).slice(2, 8).toUpperCase();
+}
+
+// ---------- ARRANQUE / SESIÓN ----------
+async function init(){
+  const { data } = await supa.auth.getSession();
+  session = data.session;
+  supa.auth.onAuthStateChange((_event, s) => { session = s; render(); });
+  render();
+}
+
+function render(){
+  if (!session){ renderLogin(); } else { renderPanel(); }
+}
+
+// ---------- LOGIN ----------
+function renderLogin(){
+  app.innerHTML = `
+    <div class="card">
+      <p class="muted">Acceso restringido a administración. Ingresá con tu cuenta.</p>
+      <input type="email" id="in-email" placeholder="Email">
+      <input type="password" id="in-pass" placeholder="Contraseña">
+      <button class="btn" id="btn-login">Ingresar</button>
+      <p class="muted" id="status-login"></p>
+    </div>
+  `;
+  document.getElementById("btn-login").onclick = async () => {
+    const email = document.getElementById("in-email").value.trim();
+    const password = document.getElementById("in-pass").value;
+    const status = document.getElementById("status-login");
+    if (!email || !password){ status.textContent = "Completá email y contraseña."; return; }
+    status.textContent = "Ingresando…";
+    const { error } = await supa.auth.signInWithPassword({ email, password });
+    if (error){ status.textContent = "Error: " + error.message; return; }
+    status.textContent = "";
+  };
+}
+
+// ---------- PANEL (autenticado) ----------
+function renderPanel(){
+  app.innerHTML = `
+    <div class="top-nav">
+      <button class="active" id="nav-material">Material</button>
+      <button id="nav-personal">Personal autorizado</button>
+      <button id="nav-logout">Salir</button>
+    </div>
+    <div id="seccion"></div>
+  `;
+  document.getElementById("nav-material").onclick = () => { marcarActivo("nav-material"); renderMaterial(); };
+  document.getElementById("nav-personal").onclick = () => { marcarActivo("nav-personal"); renderPersonal(); };
+  document.getElementById("nav-logout").onclick = async () => { await supa.auth.signOut(); };
+  renderMaterial();
+}
+
+function marcarActivo(id){
+  document.querySelectorAll(".top-nav button").forEach(b => b.classList.remove("active"));
+  const el = document.getElementById(id);
+  if (el) el.classList.add("active");
+}
+
+// ---------- MATERIAL (fichas) ----------
+function renderMaterial(){
+  const cont = document.getElementById("seccion");
+  cont.innerHTML = `
+    <div class="card">
+      <p class="muted">Carga masiva: pegá una fila por ficha, <code>LP</code> y
+        <code>nombre y apellido</code> separados por tabulación (como al
+        copiar de Excel).</p>
+      <textarea id="in-bulk" placeholder="12345&#9;Pérez, Juan&#10;12346&#9;Gómez, Ana"></textarea>
+      <button class="btn" id="btn-bulk">Cargar listado</button>
+      <p class="muted" id="status-bulk"></p>
+    </div>
+    <div class="card">
+      <p class="muted">O agregar una ficha individual:</p>
+      <input type="text" id="in-lp" placeholder="LP">
+      <input type="text" id="in-nombre" placeholder="Nombre y apellido">
+      <button class="btn secondary" id="btn-agregar">+ Agregar ficha</button>
+    </div>
+    <input type="text" id="in-buscar-material" placeholder="Buscar entre las fichas ya cargadas...">
+    <div id="lista-material"><p class="muted">Escribí para buscar.</p></div>
+  `;
+  document.getElementById("btn-bulk").onclick = cargarBulk;
+  document.getElementById("btn-agregar").onclick = agregarFichaIndividual;
+  document.getElementById("in-buscar-material").addEventListener("input", debounce(buscarMaterial, 300));
+}
+
+async function cargarBulk(){
+  const status = document.getElementById("status-bulk");
+  const lineas = document.getElementById("in-bulk").value.split("\n").map(l => l.trim()).filter(Boolean);
+  if (!lineas.length){ status.textContent = "Pegá al menos una fila."; return; }
+
+  const filas = lineas.map(l => {
+    const [legajo, nombre] = l.split("\t");
+    return { codigo: codigoUnico(), legajo: (legajo||"").trim(), nombre_paciente: (nombre||legajo||"").trim() };
+  });
+
+  status.textContent = `Cargando ${filas.length} ficha(s)…`;
+  const { data, error } = await supa.from("fichas").insert(filas).select();
+  if (error){ status.textContent = "Error: " + error.message; return; }
+  status.textContent = `${data.length} ficha(s) cargada(s).`;
+  document.getElementById("in-bulk").value = "";
+}
+
+async function agregarFichaIndividual(){
+  const legajo = document.getElementById("in-lp").value.trim();
+  const nombre = document.getElementById("in-nombre").value.trim();
+  if (!nombre){ toast("Escribí el nombre y apellido.", "err"); return; }
+  const { error } = await supa.from("fichas").insert({ codigo: codigoUnico(), legajo, nombre_paciente: nombre });
+  if (error){ toast("Error: " + error.message, "err"); return; }
+  toast(`Ficha de ${nombre} cargada.`, "ok");
+  document.getElementById("in-lp").value = "";
+  document.getElementById("in-nombre").value = "";
+}
+
+async function buscarMaterial(e){
+  const q = e.target.value.trim();
+  const cont = document.getElementById("lista-material");
+  if (!q){ cont.innerHTML = `<p class="muted">Escribí para buscar.</p>`; return; }
+  const { data, error } = await supa
+    .from("fichas").select("*")
+    .or(`legajo.ilike.%${q}%,nombre_paciente.ilike.%${q}%`)
+    .limit(15);
+  if (error){ cont.innerHTML = `<p class="muted">Error: ${error.message}</p>`; return; }
+  if (!data.length){ cont.innerHTML = `<p class="muted">Sin resultados.</p>`; return; }
+  cont.innerHTML = data.map(f => `
+    <div class="item"><div><b>${f.nombre_paciente}</b><small>LP ${f.legajo || "-"}</small></div></div>
+  `).join("");
+}
+
+// ---------- PERSONAL AUTORIZADO ----------
+function renderPersonal(){
+  const cont = document.getElementById("seccion");
+  cont.innerHTML = `
+    <div class="card">
+      <p class="muted">Registrá una tarjeta NFC nueva para autorizar a alguien a
+        retirar/devolver material. El teléfono desde el que esa persona use la
+        tarjeta por primera vez queda vinculado automáticamente.</p>
+      <input type="text" id="in-nombre-p" placeholder="Nombre y apellido">
+      <button class="btn warn" id="btn-registrar">📡 Escanear y registrar tarjeta</button>
+    </div>
+    <p class="muted">Personal autorizado:</p>
+    <div id="lista-personal"><p class="muted">Cargando…</p></div>
+  `;
+  document.getElementById("btn-registrar").onclick = async () => {
+    const nombre = document.getElementById("in-nombre-p").value.trim();
+    if (!nombre){ toast("Escribí el nombre primero.", "err"); return; }
+    leerNFCParaAlta(async (uid) => {
+      const { error } = await supa.from("personal_autorizado").insert({ nombre, nfc_uid: uid });
+      if (error){ toast("Error: " + error.message, "err"); return; }
+      toast(`Tarjeta registrada para ${nombre}.`, "ok");
+      document.getElementById("in-nombre-p").value = "";
+      cargarListaPersonal();
+    });
+  };
+  cargarListaPersonal();
+}
+
+async function cargarListaPersonal(){
+  const cont = document.getElementById("lista-personal");
+  const { data, error } = await supa
+    .from("personal_autorizado")
+    .select("*")
+    .order("creado_en", { ascending: true });
+
+  if (error){ cont.innerHTML = `<p class="muted">Error: ${error.message}</p>`; return; }
+  if (!data.length){ cont.innerHTML = `<p class="muted">Todavía no hay nadie registrado.</p>`; return; }
+
+  cont.innerHTML = data.map(p => `
+    <div class="item" style="border-left-color:${p.activo ? "var(--ok)" : "var(--line)"};">
+      <div>
+        <b>${p.nombre}</b>
+        <small>NFC ${p.nfc_uid}</small>
+        <small>${p.device_token ? "Teléfono vinculado" : "Sin teléfono vinculado todavía"}</small>
+      </div>
+      <div class="acciones">
+        <span class="badge ${p.activo ? "" : "off"}" data-accion="activo" data-id="${p.id}" data-activo="${p.activo}">
+          ${p.activo ? "Autorizado" : "Desactivado"}
+        </span>
+        ${p.device_token ? `<span class="badge off" data-accion="desvincular" data-id="${p.id}">Desvincular tel.</span>` : ""}
+      </div>
+    </div>
+  `).join("");
+
+  cont.querySelectorAll("[data-accion='activo']").forEach(el => {
+    el.onclick = async () => {
+      const nuevoEstado = el.dataset.activo !== "true";
+      const { error } = await supa.from("personal_autorizado").update({ activo: nuevoEstado }).eq("id", el.dataset.id);
+      if (error){ toast("Error: " + error.message, "err"); return; }
+      cargarListaPersonal();
+    };
+  });
+  cont.querySelectorAll("[data-accion='desvincular']").forEach(el => {
+    el.onclick = async () => {
+      const { error } = await supa.from("personal_autorizado")
+        .update({ device_token: null, device_vinculado_en: null })
+        .eq("id", el.dataset.id);
+      if (error){ toast("Error: " + error.message, "err"); return; }
+      toast("Teléfono desvinculado. Se vinculará de nuevo con el próximo uso de la tarjeta.", "ok");
+      cargarListaPersonal();
+    };
+  });
+}
+
+async function leerNFCParaAlta(callback){
+  if (!("NDEFReader" in window)){
+    toast("Este navegador no soporta NFC. Usá Chrome en Android.", "err");
+    return;
+  }
+  try{
+    const reader = new NDEFReader();
+    await reader.scan();
+    toast("Acercá la tarjeta al dorso del teléfono…", "ok");
+    reader.onreading = (event) => callback(event.serialNumber);
+  } catch(e){
+    toast("No se pudo activar el lector NFC: " + e.message, "err");
+  }
+}
+
+init();
+</script>
+</body>
+</html>
