@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Fichero JPRM</title>
+<script src="https://unpkg.com/@supabase/supabase-js@2"></script>
+<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<style>
+  :root{
+    --bg:#0f1720; --panel:#182430; --panel2:#1f2e3c; --line:#2a3a49;
+    --text:#e8edf2; --muted:#8aa0b2; --accent:#3fb8af; --accent2:#e0a336;
+    --danger:#d9534f; --ok:#4caf7d; --radius:14px;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; background:var(--bg); color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+    min-height:100vh; padding:20px; padding-bottom:60px;
+  }
+  h1{font-size:1.1rem; letter-spacing:.04em; text-transform:uppercase; color:var(--muted); margin:0 0 4px;}
+  h2{font-size:1.5rem; margin:0 0 20px;}
+  .card{background:var(--panel); border:1px solid var(--line); border-radius:var(--radius); padding:20px; margin-bottom:16px;}
+  .btn{
+    display:block; width:100%; padding:16px; border-radius:12px; border:none;
+    font-size:1.05rem; font-weight:600; margin-bottom:12px; cursor:pointer;
+    background:var(--accent); color:#08201d;
+  }
+  .btn.secondary{background:var(--panel2); color:var(--text); border:1px solid var(--line);}
+  .btn.danger{background:var(--danger); color:#fff;}
+  .btn.warn{background:var(--accent2); color:#3a2500;}
+  .btn:disabled{opacity:.4;}
+  .muted{color:var(--muted); font-size:.9rem;}
+  .persona{
+    display:flex; align-items:center; justify-content:space-between;
+    background:var(--panel2); border-radius:10px; padding:12px 16px; margin-bottom:16px;
+  }
+  .persona b{font-size:1.1rem;}
+  #qr-reader{border-radius:12px; overflow:hidden; margin-bottom:14px;}
+  .item{
+    display:flex; justify-content:space-between; align-items:center;
+    background:var(--panel2); border-radius:10px; padding:10px 14px; margin-bottom:8px;
+    border-left:3px solid var(--accent);
+  }
+  .item.afuera{border-left-color:var(--accent2);}
+  .item small{display:block; color:var(--muted);}
+  .toast{
+    position:fixed; left:20px; right:20px; bottom:20px; padding:14px 18px;
+    border-radius:12px; font-weight:600; text-align:center; z-index:50;
+  }
+  .toast.err{background:var(--danger); color:#fff;}
+  .toast.ok{background:var(--ok); color:#06210f;}
+  .hidden{display:none !important;}
+  .top-nav{display:flex; gap:8px; margin-bottom:18px;}
+  .top-nav button{flex:1; padding:10px; border-radius:10px; border:1px solid var(--line); background:var(--panel); color:var(--muted); font-size:.85rem;}
+  .top-nav button.active{background:var(--accent); color:#08201d; border-color:var(--accent);}
+  code{background:var(--panel2); padding:2px 6px; border-radius:4px; font-size:.85em;}
+</style>
+</head>
+<body>
+
+<h1>JPRM · Junta Médica</h1>
+<h2>Control de fichero</h2>
+
+<!-- ====== CONFIGURACIÓN: completar antes de usar ====== -->
+<script>
+  const SUPABASE_URL = "https://TU-PROYECTO.supabase.co";
+  const SUPABASE_ANON_KEY = "TU-ANON-KEY";
+</script>
+
+<div id="app"></div>
+<div id="toast" class="toast hidden"></div>
+
+<script>
+const supa = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+const app = document.getElementById("app");
+
+let persona = null;       // persona identificada por NFC
+let modo = null;          // 'retiro' | 'devolucion'
+let pendientes = [];      // fichas escaneadas en esta sesión
+let qrScanner = null;
+
+function toast(msg, type="ok"){
+  const t = document.getElementById("toast");
+  t.textContent = msg;
+  t.className = "toast " + type;
+  setTimeout(()=> t.classList.add("hidden"), 3200);
+}
+
+// ---------- PANTALLA INICIAL ----------
+function renderHome(){
+  persona = null; modo = null; pendientes = [];
+  app.innerHTML = `
+    <div class="top-nav">
+      <button class="active" id="nav-home">Inicio</button>
+      <button id="nav-dash">Fichas afuera</button>
+      <button id="nav-admin">Personal</button>
+    </div>
+    <div class="card">
+      <p class="muted">Apoyá tu tarjeta para identificarte y elegir una acción.</p>
+      <button class="btn" id="btn-scan-nfc">📡 Escanear tarjeta</button>
+    </div>
+  `;
+  document.getElementById("btn-scan-nfc").onclick = leerNFC;
+  document.getElementById("nav-dash").onclick = renderDashboard;
+  document.getElementById("nav-admin").onclick = renderAdmin;
+}
+
+// ---------- LECTURA NFC ----------
+async function leerNFC(onSuccess){
+  if (!("NDEFReader" in window)){
+    toast("Este navegador no soporta NFC. Usá Chrome en Android.", "err");
+    return;
+  }
+  try{
+    const reader = new NDEFReader();
+    await reader.scan();
+    toast("Acercá la tarjeta al dorso del teléfono…", "ok");
+    reader.onreading = async (event) => {
+      const uid = event.serialNumber;
+      if (onSuccess){ onSuccess(uid); return; }
+      const { data, error } = await supa
+        .from("personal_autorizado")
+        .select("*")
+        .eq("nfc_uid", uid)
+        .eq("activo", true)
+        .maybeSingle();
+      if (error || !data){
+        toast("Tarjeta no reconocida. Registrala en 'Personal'.", "err");
+        return;
+      }
+      persona = data;
+      renderMenuPersona();
+    };
+  } catch(e){
+    toast("No se pudo activar el lector NFC: " + e.message, "err");
+  }
+}
+
+// ---------- MENÚ DE LA PERSONA IDENTIFICADA ----------
+function renderMenuPersona(){
+  app.innerHTML = `
+    <div class="persona"><b>${persona.nombre}</b><span class="muted">identificado ✓</span></div>
+    <button class="btn" id="btn-retiro">📤 Retirar ficha(s)</button>
+    <button class="btn secondary" id="btn-devolucion">📥 Devolver ficha(s)</button>
+    <button class="btn secondary" id="btn-cancelar">Cancelar</button>
+  `;
+  document.getElementById("btn-retiro").onclick = () => iniciarEscaneo("retiro");
+  document.getElementById("btn-devolucion").onclick = () => iniciarEscaneo("devolucion");
+  document.getElementById("btn-cancelar").onclick = renderHome;
+}
+
+// ---------- ESCANEO DE FICHAS (QR) ----------
+function iniciarEscaneo(m){
+  modo = m; pendientes = [];
+  app.innerHTML = `
+    <div class="persona"><b>${persona.nombre}</b><span class="muted">${m === "retiro" ? "Retirando" : "Devolviendo"}</span></div>
+    <div id="qr-reader"></div>
+    <p class="muted">Escaneá el QR de cada ficha. Podés escanear una o varias.</p>
+    <div id="lista"></div>
+    <button class="btn" id="btn-confirmar" disabled>Confirmar (0)</button>
+    <button class="btn secondary" id="btn-cancelar">Cancelar</button>
+  `;
+  document.getElementById("btn-cancelar").onclick = () => { detenerScanner(); renderMenuPersona(); };
+  document.getElementById("btn-confirmar").onclick = confirmarMovimiento;
+
+  qrScanner = new Html5Qrcode("qr-reader");
+  qrScanner.start(
+    { facingMode: "environment" },
+    { fps: 10, qrbox: 220 },
+    onQrDetectado,
+    () => {}
+  );
+}
+
+async function onQrDetectado(codigo){
+  if (pendientes.find(p => p.codigo === codigo)) return; // ya escaneada en esta sesión
+
+  const { data: ficha, error } = await supa
+    .from("fichas").select("*").eq("codigo", codigo).maybeSingle();
+
+  if (error || !ficha){
+    toast("QR no corresponde a ninguna ficha registrada.", "err");
+    return;
+  }
+
+  const { data: abierto } = await supa
+    .from("prestamos")
+    .select("*, personal_autorizado!prestamos_persona_retira_id_fkey(nombre)")
+    .eq("ficha_id", ficha.id)
+    .is("hora_devolucion", null)
+    .maybeSingle();
+
+  if (modo === "retiro"){
+    if (abierto){
+      toast(`"${ficha.nombre_paciente}" ya está afuera (la tiene ${abierto.personal_autorizado.nombre}).`, "err");
+      return;
+    }
+    pendientes.push({ ficha, tipo:"retiro" });
+  } else {
+    if (!abierto){
+      toast(`"${ficha.nombre_paciente}" no figura retirada.`, "err");
+      return;
+    }
+    pendientes.push({ ficha, tipo:"devolucion", prestamoId: abierto.id });
+  }
+
+  actualizarLista();
+  if (navigator.vibrate) navigator.vibrate(80);
+}
+
+function actualizarLista(){
+  const lista = document.getElementById("lista");
+  lista.innerHTML = pendientes.map(p => `
+    <div class="item">
+      <div><b>${p.ficha.nombre_paciente}</b><small>Legajo ${p.ficha.legajo || "-"}</small></div>
+    </div>
+  `).join("");
+  const btn = document.getElementById("btn-confirmar");
+  btn.disabled = pendientes.length === 0;
+  btn.textContent = `Confirmar (${pendientes.length})`;
+}
+
+function detenerScanner(){
+  if (qrScanner){
+    qrScanner.stop().catch(()=>{});
+    qrScanner = null;
+  }
+}
+
+async function confirmarMovimiento(){
+  detenerScanner();
+  if (modo === "retiro"){
+    const filas = pendientes.map(p => ({
+      ficha_id: p.ficha.id,
+      persona_retira_id: persona.id
+    }));
+    const { error } = await supa.from("prestamos").insert(filas);
+    if (error){ toast("Error al guardar: " + error.message, "err"); return; }
+    toast(`${filas.length} ficha(s) registradas como retiradas.`, "ok");
+  } else {
+    for (const p of pendientes){
+      await supa.from("prestamos")
+        .update({ hora_devolucion: new Date().toISOString(), persona_devuelve_id: persona.id })
+        .eq("id", p.prestamoId);
+    }
+    toast(`${pendientes.length} ficha(s) registradas como devueltas.`, "ok");
+  }
+  renderHome();
+}
+
+// ---------- DASHBOARD: fichas afuera ----------
+async function renderDashboard(){
+  app.innerHTML = `
+    <div class="top-nav">
+      <button id="nav-home">Inicio</button>
+      <button class="active" id="nav-dash">Fichas afuera</button>
+      <button id="nav-admin">Personal</button>
+    </div>
+    <div class="card"><p class="muted">Cargando…</p></div>
+  `;
+  document.getElementById("nav-home").onclick = renderHome;
+  document.getElementById("nav-admin").onclick = renderAdmin;
+
+  const { data, error } = await supa
+    .from("prestamos")
+    .select("*, fichas(nombre_paciente, legajo), personal_autorizado!prestamos_persona_retira_id_fkey(nombre)")
+    .is("hora_devolucion", null)
+    .order("hora_retiro", { ascending: true });
+
+  const cont = document.querySelector(".card");
+  if (error){ cont.innerHTML = `<p class="muted">Error al cargar: ${error.message}</p>`; return; }
+  if (!data.length){ cont.innerHTML = `<p class="muted">No hay fichas afuera en este momento.</p>`; return; }
+
+  cont.innerHTML = data.map(p => {
+    const horas = ((Date.now() - new Date(p.hora_retiro)) / 3600000).toFixed(1);
+    return `
+      <div class="item afuera">
+        <div>
+          <b>${p.fichas.nombre_paciente}</b>
+          <small>Legajo ${p.fichas.legajo || "-"} · con ${p.personal_autorizado.nombre}</small>
+        </div>
+        <small>${horas} h</small>
+      </div>`;
+  }).join("");
+}
+
+// ---------- ADMIN: registrar tarjetas del personal ----------
+function renderAdmin(){
+  app.innerHTML = `
+    <div class="top-nav">
+      <button id="nav-home">Inicio</button>
+      <button id="nav-dash">Fichas afuera</button>
+      <button class="active" id="nav-admin">Personal</button>
+    </div>
+    <div class="card">
+      <p class="muted">Registrá una tarjeta NFC nueva para un integrante autorizado.</p>
+      <input id="in-nombre" placeholder="Nombre y apellido" style="width:100%;padding:12px;border-radius:10px;border:1px solid var(--line);background:var(--panel2);color:var(--text);margin-bottom:12px;">
+      <button class="btn warn" id="btn-registrar">📡 Escanear y registrar tarjeta</button>
+    </div>
+  `;
+  document.getElementById("nav-home").onclick = renderHome;
+  document.getElementById("nav-dash").onclick = renderDashboard;
+  document.getElementById("btn-registrar").onclick = async () => {
+    const nombre = document.getElementById("in-nombre").value.trim();
+    if (!nombre){ toast("Escribí el nombre primero.", "err"); return; }
+    leerNFC(async (uid) => {
+      const { error } = await supa.from("personal_autorizado").insert({ nombre, nfc_uid: uid });
+      if (error){ toast("Error: " + error.message, "err"); return; }
+      toast(`Tarjeta registrada para ${nombre}.`, "ok");
+      renderAdmin();
+    });
+  };
+}
+
+renderHome();
+</script>
+</body>
+</html>
