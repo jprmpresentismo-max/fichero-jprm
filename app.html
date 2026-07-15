@@ -5,7 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Fichero JPRM</title>
 <script src="https://unpkg.com/@supabase/supabase-js@2"></script>
-<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
 <style>
   :root{
     --bg:#0f1720; --panel:#182430; --panel2:#1f2e3c; --line:#2a3a49;
@@ -36,14 +35,19 @@
     background:var(--panel2); border-radius:10px; padding:12px 16px; margin-bottom:16px;
   }
   .persona b{font-size:1.1rem;}
-  #qr-reader{border-radius:12px; overflow:hidden; margin-bottom:14px;}
+  input[type=text]{
+    width:100%; padding:12px; border-radius:10px; border:1px solid var(--line);
+    background:var(--panel2); color:var(--text); margin-bottom:12px; font-size:1rem;
+  }
   .item{
     display:flex; justify-content:space-between; align-items:center;
     background:var(--panel2); border-radius:10px; padding:10px 14px; margin-bottom:8px;
-    border-left:3px solid var(--accent);
+    border-left:3px solid var(--accent); cursor:pointer;
   }
-  .item.afuera{border-left-color:var(--accent2);}
+  .item.afuera{border-left-color:var(--accent2); cursor:default;}
+  .item.sel{border-left-color:var(--ok); cursor:default;}
   .item small{display:block; color:var(--muted);}
+  .item .x{color:var(--danger); font-weight:700; padding:4px 10px; cursor:pointer;}
   .toast{
     position:fixed; left:20px; right:20px; bottom:20px; padding:14px 18px;
     border-radius:12px; font-weight:600; text-align:center; z-index:50;
@@ -55,6 +59,8 @@
   .top-nav button{flex:1; padding:10px; border-radius:10px; border:1px solid var(--line); background:var(--panel); color:var(--muted); font-size:.85rem;}
   .top-nav button.active{background:var(--accent); color:#08201d; border-color:var(--accent);}
   code{background:var(--panel2); padding:2px 6px; border-radius:4px; font-size:.85em;}
+  .badge{font-size:.75rem; padding:3px 9px; border-radius:20px; background:var(--ok); color:#06210f; font-weight:700; cursor:pointer;}
+  .badge.off{background:var(--line); color:var(--muted);}
 </style>
 </head>
 <body>
@@ -77,14 +83,22 @@ const app = document.getElementById("app");
 
 let persona = null;       // persona identificada por NFC
 let modo = null;          // 'retiro' | 'devolucion'
-let pendientes = [];      // fichas escaneadas en esta sesión
-let qrScanner = null;
+let pendientes = [];      // fichas elegidas en esta sesión
 
 function toast(msg, type="ok"){
   const t = document.getElementById("toast");
   t.textContent = msg;
   t.className = "toast " + type;
   setTimeout(()=> t.classList.add("hidden"), 3200);
+}
+
+function debounce(fn, ms){
+  let temp;
+  return (...args) => { clearTimeout(temp); temp = setTimeout(() => fn(...args), ms); };
+}
+
+function codigoUnico(){
+  return "F-" + Math.random().toString(36).slice(2, 8).toUpperCase();
 }
 
 // ---------- PANTALLA INICIAL ----------
@@ -106,7 +120,7 @@ function renderHome(){
   document.getElementById("nav-admin").onclick = renderAdmin;
 }
 
-// ---------- LECTURA NFC ----------
+// ---------- LECTURA NFC (identifica y autoriza al personal) ----------
 async function leerNFC(onSuccess){
   if (!("NDEFReader" in window)){
     toast("Este navegador no soporta NFC. Usá Chrome en Android.", "err");
@@ -126,7 +140,7 @@ async function leerNFC(onSuccess){
         .eq("activo", true)
         .maybeSingle();
       if (error || !data){
-        toast("Tarjeta no reconocida. Registrala en 'Personal'.", "err");
+        toast("Tarjeta no reconocida o sin autorización. Registrala en 'Personal'.", "err");
         return;
       }
       persona = data;
@@ -145,42 +159,93 @@ function renderMenuPersona(){
     <button class="btn secondary" id="btn-devolucion">📥 Devolver ficha(s)</button>
     <button class="btn secondary" id="btn-cancelar">Cancelar</button>
   `;
-  document.getElementById("btn-retiro").onclick = () => iniciarEscaneo("retiro");
-  document.getElementById("btn-devolucion").onclick = () => iniciarEscaneo("devolucion");
+  document.getElementById("btn-retiro").onclick = () => iniciarSeleccion("retiro");
+  document.getElementById("btn-devolucion").onclick = () => iniciarSeleccion("devolucion");
   document.getElementById("btn-cancelar").onclick = renderHome;
 }
 
-// ---------- ESCANEO DE FICHAS (QR) ----------
-function iniciarEscaneo(m){
+// ---------- SELECCIÓN DE FICHAS: búsqueda por LP o nombre (sin QR por ahora) ----------
+function iniciarSeleccion(m){
   modo = m; pendientes = [];
   app.innerHTML = `
     <div class="persona"><b>${persona.nombre}</b><span class="muted">${m === "retiro" ? "Retirando" : "Devolviendo"}</span></div>
-    <div id="qr-reader"></div>
-    <p class="muted">Escaneá el QR de cada ficha. Podés escanear una o varias.</p>
+    <input type="text" id="in-buscar" placeholder="Buscar por LP o nombre y apellido...">
+    <div id="resultados"></div>
+
+    <div class="card hidden" id="card-nueva">
+      <p class="muted">No se encontró ninguna ficha. Cargar una nueva:</p>
+      <input type="text" id="in-lp-nueva" placeholder="LP">
+      <input type="text" id="in-nombre-nueva" placeholder="Nombre y apellido">
+      <button class="btn secondary" id="btn-crear-nueva">+ Crear y agregar</button>
+    </div>
+
+    <p class="muted" id="titulo-lista"></p>
     <div id="lista"></div>
     <button class="btn" id="btn-confirmar" disabled>Confirmar (0)</button>
     <button class="btn secondary" id="btn-cancelar">Cancelar</button>
   `;
-  document.getElementById("btn-cancelar").onclick = () => { detenerScanner(); renderMenuPersona(); };
+  document.getElementById("btn-cancelar").onclick = renderMenuPersona;
   document.getElementById("btn-confirmar").onclick = confirmarMovimiento;
-
-  qrScanner = new Html5Qrcode("qr-reader");
-  qrScanner.start(
-    { facingMode: "environment" },
-    { fps: 10, qrbox: 220 },
-    onQrDetectado,
-    () => {}
-  );
+  document.getElementById("btn-crear-nueva").onclick = crearFichaNueva;
+  document.getElementById("in-buscar").addEventListener("input", debounce(onBuscarInput, 300));
+  document.getElementById("in-buscar").focus();
+  actualizarLista();
 }
 
-async function onQrDetectado(codigo){
-  if (pendientes.find(p => p.codigo === codigo)) return; // ya escaneada en esta sesión
+async function onBuscarInput(e){
+  const q = e.target.value.trim();
+  const cardNueva = document.getElementById("card-nueva");
+  const cont = document.getElementById("resultados");
+  if (!q){ cont.innerHTML = ""; cardNueva.classList.add("hidden"); return; }
 
-  const { data: ficha, error } = await supa
-    .from("fichas").select("*").eq("codigo", codigo).maybeSingle();
+  const { data, error } = await supa
+    .from("fichas")
+    .select("*")
+    .or(`legajo.ilike.%${q}%,nombre_paciente.ilike.%${q}%`)
+    .limit(8);
 
-  if (error || !ficha){
-    toast("QR no corresponde a ninguna ficha registrada.", "err");
+  if (error){ cont.innerHTML = `<p class="muted">Error al buscar: ${error.message}</p>`; return; }
+
+  if (!data.length){
+    cont.innerHTML = `<p class="muted">Sin resultados.</p>`;
+    document.getElementById("in-nombre-nueva").value = q;
+    cardNueva.classList.remove("hidden");
+    return;
+  }
+  cardNueva.classList.add("hidden");
+  cont.innerHTML = data.map(f => `
+    <div class="item" data-id="${f.id}">
+      <div><b>${f.nombre_paciente}</b><small>LP ${f.legajo || "-"}</small></div>
+    </div>
+  `).join("");
+  cont.querySelectorAll(".item").forEach(el => {
+    el.onclick = () => {
+      const f = data.find(x => x.id === el.dataset.id);
+      seleccionarFicha(f);
+    };
+  });
+}
+
+async function crearFichaNueva(){
+  const legajo = document.getElementById("in-lp-nueva").value.trim();
+  const nombre = document.getElementById("in-nombre-nueva").value.trim();
+  if (!nombre){ toast("Escribí el nombre y apellido.", "err"); return; }
+  const { data, error } = await supa
+    .from("fichas")
+    .insert({ codigo: codigoUnico(), legajo, nombre_paciente: nombre })
+    .select()
+    .single();
+  if (error){ toast("Error al crear la ficha: " + error.message, "err"); return; }
+  toast(`Ficha de ${nombre} creada.`, "ok");
+  document.getElementById("in-buscar").value = "";
+  document.getElementById("resultados").innerHTML = "";
+  document.getElementById("card-nueva").classList.add("hidden");
+  seleccionarFicha(data);
+}
+
+async function seleccionarFicha(ficha){
+  if (pendientes.find(p => p.ficha.id === ficha.id)){
+    toast("Ya la agregaste.", "err");
     return;
   }
 
@@ -205,31 +270,37 @@ async function onQrDetectado(codigo){
     pendientes.push({ ficha, tipo:"devolucion", prestamoId: abierto.id });
   }
 
+  document.getElementById("in-buscar").value = "";
+  document.getElementById("resultados").innerHTML = "";
+  document.getElementById("card-nueva").classList.add("hidden");
   actualizarLista();
   if (navigator.vibrate) navigator.vibrate(80);
 }
 
+function quitarPendiente(id){
+  pendientes = pendientes.filter(p => p.ficha.id !== id);
+  actualizarLista();
+}
+
 function actualizarLista(){
+  const titulo = document.getElementById("titulo-lista");
   const lista = document.getElementById("lista");
+  titulo.textContent = pendientes.length ? "Seleccionadas:" : "";
   lista.innerHTML = pendientes.map(p => `
-    <div class="item">
-      <div><b>${p.ficha.nombre_paciente}</b><small>Legajo ${p.ficha.legajo || "-"}</small></div>
+    <div class="item sel">
+      <div><b>${p.ficha.nombre_paciente}</b><small>LP ${p.ficha.legajo || "-"}</small></div>
+      <span class="x" data-id="${p.ficha.id}">✕</span>
     </div>
   `).join("");
+  lista.querySelectorAll(".x").forEach(el => {
+    el.onclick = () => quitarPendiente(el.dataset.id);
+  });
   const btn = document.getElementById("btn-confirmar");
   btn.disabled = pendientes.length === 0;
   btn.textContent = `Confirmar (${pendientes.length})`;
 }
 
-function detenerScanner(){
-  if (qrScanner){
-    qrScanner.stop().catch(()=>{});
-    qrScanner = null;
-  }
-}
-
 async function confirmarMovimiento(){
-  detenerScanner();
   if (modo === "retiro"){
     const filas = pendientes.map(p => ({
       ficha_id: p.ficha.id,
@@ -278,14 +349,14 @@ async function renderDashboard(){
       <div class="item afuera">
         <div>
           <b>${p.fichas.nombre_paciente}</b>
-          <small>Legajo ${p.fichas.legajo || "-"} · con ${p.personal_autorizado.nombre}</small>
+          <small>LP ${p.fichas.legajo || "-"} · con ${p.personal_autorizado.nombre}</small>
         </div>
         <small>${horas} h</small>
       </div>`;
   }).join("");
 }
 
-// ---------- ADMIN: registrar tarjetas del personal ----------
+// ---------- ADMIN: personal autorizado a acceder (alta + activar/desactivar) ----------
 function renderAdmin(){
   app.innerHTML = `
     <div class="top-nav">
@@ -294,10 +365,12 @@ function renderAdmin(){
       <button class="active" id="nav-admin">Personal</button>
     </div>
     <div class="card">
-      <p class="muted">Registrá una tarjeta NFC nueva para un integrante autorizado.</p>
-      <input id="in-nombre" placeholder="Nombre y apellido" style="width:100%;padding:12px;border-radius:10px;border:1px solid var(--line);background:var(--panel2);color:var(--text);margin-bottom:12px;">
+      <p class="muted">Registrá una tarjeta NFC nueva para autorizar a alguien a retirar/devolver fichas.</p>
+      <input type="text" id="in-nombre" placeholder="Nombre y apellido">
       <button class="btn warn" id="btn-registrar">📡 Escanear y registrar tarjeta</button>
     </div>
+    <p class="muted">Personal autorizado (tocá el estado para activar/desactivar el acceso):</p>
+    <div id="lista-personal"><p class="muted">Cargando…</p></div>
   `;
   document.getElementById("nav-home").onclick = renderHome;
   document.getElementById("nav-dash").onclick = renderDashboard;
@@ -307,10 +380,43 @@ function renderAdmin(){
     leerNFC(async (uid) => {
       const { error } = await supa.from("personal_autorizado").insert({ nombre, nfc_uid: uid });
       if (error){ toast("Error: " + error.message, "err"); return; }
-      toast(`Tarjeta registrada para ${nombre}.`, "ok");
+      toast(`Tarjeta registrada para ${nombre}. Ya puede retirar/devolver fichas.`, "ok");
       renderAdmin();
     });
   };
+  cargarListaPersonal();
+}
+
+async function cargarListaPersonal(){
+  const cont = document.getElementById("lista-personal");
+  const { data, error } = await supa
+    .from("personal_autorizado")
+    .select("*")
+    .order("creado_en", { ascending: true });
+
+  if (error){ cont.innerHTML = `<p class="muted">Error al cargar: ${error.message}</p>`; return; }
+  if (!data.length){ cont.innerHTML = `<p class="muted">Todavía no hay nadie registrado.</p>`; return; }
+
+  cont.innerHTML = data.map(p => `
+    <div class="item" style="border-left-color:${p.activo ? "var(--ok)" : "var(--line)"}; cursor:default;">
+      <div><b>${p.nombre}</b><small>NFC ${p.nfc_uid}</small></div>
+      <span class="badge ${p.activo ? "" : "off"}" data-id="${p.id}" data-activo="${p.activo}">
+        ${p.activo ? "Autorizado" : "Desactivado"}
+      </span>
+    </div>
+  `).join("");
+
+  cont.querySelectorAll(".badge").forEach(el => {
+    el.onclick = async () => {
+      const nuevoEstado = el.dataset.activo !== "true";
+      const { error } = await supa
+        .from("personal_autorizado")
+        .update({ activo: nuevoEstado })
+        .eq("id", el.dataset.id);
+      if (error){ toast("Error: " + error.message, "err"); return; }
+      cargarListaPersonal();
+    };
+  });
 }
 
 renderHome();
