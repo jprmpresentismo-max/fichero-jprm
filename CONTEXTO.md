@@ -86,32 +86,36 @@ armado y sin tocar para cuando se retome esa parte.
   También con credenciales placeholder.
 - `generar_qr.html` → en pausa, no tocar por ahora.
 
+## Estado de la carga de datos (hecho el 2026-07-15)
+Las credenciales de Supabase ya están cargadas en `app.html` y `admin.html`,
+el `schema.sql` ya corrió en el proyecto, David ya fue invitado como usuario
+admin, y **la tabla `fichas` ya tiene cargado el listado completo de
+personal de la PFA**: 28.464 filas, extraídas de `SuboNuevoJunta24.mdb`
+(columna `legajo` = LP, `nombre_paciente` = "APELLIDO, NOMBRE"). Verificado
+con `select count(*) from fichas;` → 28464. La carga se hizo desde el SQL
+Editor de Supabase en 10 tandas (INSERT de ~3000 filas cada una), seteando
+el contenido del editor directamente vía `monaco.editor` en vez de tipear o
+pegar (para evitar el bug de corrupción de texto al tipear bloques grandes
+en el editor Monaco). Los archivos SQL temporales usados para la carga ya
+fueron borrados del repo.
+
 ## Lo que falta para dejarlo funcionando
-1. **Credenciales de Supabase**: `app.html` y `admin.html` tienen
-   placeholders `SUPABASE_URL` / `SUPABASE_ANON_KEY` sin completar. Hay que
-   pedirle a David la URL y anon key de su proyecto existente (Settings →
-   API en Supabase).
-2. **Correr el `schema.sql` nuevo** en ese proyecto Supabase (SQL Editor →
-   pegar y ejecutar completo).
-3. **Habilitar Email/Password en Supabase Auth** (Authentication →
-   Providers → Email, si no está ya habilitado por Presentismo/Ascenso) y
-   **crear el usuario de David** (Authentication → Users → Add user) con su
-   email y una contraseña que él elija. Ese es el login que va a usar en
-   `admin.html`. Cowork no puede crear ni ver esa contraseña — la define
-   David directamente en el dashboard de Supabase.
-4. **Cargar el listado de personal de la PFA** (David lo va a pasar) desde
-   `admin.html` → Material → carga masiva.
-5. **Registrar al personal autorizado** desde `admin.html` → Personal
+1. **Probar que David pueda entrar a `admin.html`**: David tiene que
+   revisar su email (`carlosdaviddiaz1992@gmail.com`) para aceptar la
+   invitación de Supabase Auth y elegir su contraseña, y después probar el
+   login en `admin.html`.
+2. **Registrar al personal autorizado** desde `admin.html` → Personal
    autorizado (cada uno apoya su tarjeta NFC + se escribe su nombre). El
    vínculo con el teléfono de cada uno se hace solo, la primera vez que esa
    persona use `app.html` con su tarjeta.
-6. **Probar el flujo completo**: retirar, ver que aparece en "Fichas
-   afuera", devolver, ver que desaparece. Probar el bloqueo por material ya
-   afuera, y probar que usar la misma tarjeta desde un segundo teléfono se
-   rechace (y que "Desvincular tel." en el panel lo habilite de nuevo).
-7. **(Más adelante) Retomar QR**: cuando David tenga el listado real y
-   quiera imprimir etiquetas, correr `generar_qr.html` y evaluar si conviene
-   sumarlo como atajo adicional en `app.html`.
+3. **Probar el flujo completo**: buscar una ficha por LP o nombre, retirar,
+   ver que aparece en "Fichas afuera", devolver, ver que desaparece. Probar
+   el bloqueo por material ya afuera, y probar que usar la misma tarjeta
+   desde un segundo teléfono se rechace (y que "Desvincular tel." en el
+   panel lo habilite de nuevo).
+4. **(Más adelante) Retomar QR**: si David quiere imprimir etiquetas, correr
+   `generar_qr.html` y evaluar si conviene sumarlo como atajo adicional en
+   `app.html`.
 
 ## Decisiones ya tomadas (no volver a preguntar)
 - QR pausado por ahora; búsqueda por LP/nombre es el mecanismo actual. No
