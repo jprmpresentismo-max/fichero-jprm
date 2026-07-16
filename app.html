@@ -30,6 +30,7 @@
   .btn.warn{background:var(--accent2); color:#3a2500;}
   .btn:disabled{opacity:.4;}
   .muted{color:var(--muted); font-size:.9rem;}
+  .link{background:none; border:none; color:var(--accent); font-size:.85rem; padding:6px 0; cursor:pointer; text-decoration:underline;}
   .persona{
     display:flex; align-items:center; justify-content:space-between;
     background:var(--panel2); border-radius:10px; padding:12px 16px; margin-bottom:16px;
@@ -79,7 +80,7 @@
 const supa = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 const app = document.getElementById("app");
 
-let persona = null;       // persona identificada por NFC { id, nombre }
+let persona = null;       // persona identificada { id, nombre }
 let modo = null;          // 'retiro' | 'devolucion'
 let pendientes = [];      // fichas elegidas en esta sesión
 
@@ -95,8 +96,9 @@ function debounce(fn, ms){
   return (...args) => { clearTimeout(temp); temp = setTimeout(() => fn(...args), ms); };
 }
 
-// Identificador persistente de este teléfono/navegador (para vincular la
-// tarjeta NFC de cada persona a un único dispositivo).
+// Identificador persistente de este teléfono/navegador (para vincular a
+// cada persona autorizada con un único dispositivo). Funciona igual en
+// Android e iOS: no depende de NFC ni de ninguna API específica.
 function getDeviceId(){
   let id = localStorage.getItem("jprm_device_id");
   if (!id){
@@ -106,8 +108,42 @@ function getDeviceId(){
   return id;
 }
 
-// ---------- PANTALLA INICIAL ----------
-function renderHome(){
+function guardarPersonaLocal(p){
+  localStorage.setItem("jprm_persona_id", p.id);
+  localStorage.setItem("jprm_persona_nombre", p.nombre);
+}
+
+function olvidarPersonaLocal(){
+  localStorage.removeItem("jprm_persona_id");
+  localStorage.removeItem("jprm_persona_nombre");
+}
+
+// ---------- ARRANQUE ----------
+// Si este teléfono ya está vinculado a alguien (uso anterior), entra
+// directo a su menú sin volver a pedir identificación.
+async function init(){
+  const idGuardado = localStorage.getItem("jprm_persona_id");
+  if (idGuardado){
+    const deviceId = getDeviceId();
+    const { data, error } = await supa
+      .from("personal_autorizado")
+      .select("id, nombre, activo, device_token")
+      .eq("id", idGuardado)
+      .maybeSingle();
+
+    if (!error && data && data.activo && data.device_token === deviceId){
+      persona = { id: data.id, nombre: data.nombre };
+      renderMenuPersona();
+      return;
+    }
+    // Ya no es válido (desactivado, desvinculado o vencido): se olvida.
+    olvidarPersonaLocal();
+  }
+  renderIdentificar();
+}
+
+// ---------- IDENTIFICACIÓN (primera vez en este teléfono) ----------
+function renderIdentificar(){
   persona = null; modo = null; pendientes = [];
   app.innerHTML = `
     <div class="top-nav">
@@ -115,62 +151,85 @@ function renderHome(){
       <button id="nav-dash">Fichas afuera</button>
     </div>
     <div class="card">
-      <p class="muted">Apoyá tu tarjeta para identificarte y elegir una acción.</p>
-      <button class="btn" id="btn-scan-nfc">📡 Escanear tarjeta</button>
+      <p class="muted">Primer uso en este teléfono: buscá tu nombre o tu LP
+        en la lista de personal autorizado para identificarte. Después de
+        esto no hace falta que lo vuelvas a hacer desde este mismo
+        teléfono.</p>
+      <input type="text" id="in-buscar-persona" placeholder="Buscar por LP o nombre y apellido...">
+      <div id="resultados-persona"></div>
     </div>
   `;
-  document.getElementById("btn-scan-nfc").onclick = leerNFC;
   document.getElementById("nav-dash").onclick = renderDashboard;
+  document.getElementById("in-buscar-persona").addEventListener("input", debounce(onBuscarPersonaInput, 300));
+  document.getElementById("in-buscar-persona").focus();
 }
 
-// ---------- LECTURA NFC: identifica a la persona y vincula el teléfono ----------
-async function leerNFC(){
-  if (!("NDEFReader" in window)){
-    toast("Este navegador no soporta NFC. Usá Chrome en Android.", "err");
+async function onBuscarPersonaInput(e){
+  const q = e.target.value.trim();
+  const cont = document.getElementById("resultados-persona");
+  if (!q){ cont.innerHTML = ""; return; }
+
+  const { data, error } = await supa
+    .from("personal_autorizado")
+    .select("id, nombre, legajo, jerarquia")
+    .eq("activo", true)
+    .or(`legajo.ilike.%${q}%,nombre.ilike.%${q}%`)
+    .limit(8);
+
+  if (error){ cont.innerHTML = `<p class="muted">Error al buscar: ${error.message}</p>`; return; }
+  if (!data.length){
+    cont.innerHTML = `<p class="muted">Sin resultados. Si no estás en la lista, pedile a un administrador que te agregue.</p>`;
     return;
   }
-  try{
-    const reader = new NDEFReader();
-    await reader.scan();
-    toast("Acercá la tarjeta al dorso del teléfono…", "ok");
-    reader.onreading = async (event) => {
-      const uid = event.serialNumber;
-      const deviceId = getDeviceId();
+  cont.innerHTML = data.map(p => `
+    <div class="item" data-id="${p.id}">
+      <div><b>${p.nombre}</b><small>${[p.legajo ? "LP " + p.legajo : null, p.jerarquia || null].filter(Boolean).join(" · ")}</small></div>
+    </div>
+  `).join("");
+  cont.querySelectorAll(".item").forEach(el => {
+    el.onclick = () => identificarComo(el.dataset.id);
+  });
+}
 
-      const { data, error } = await supa.rpc("jprm_identificar", {
-        p_nfc_uid: uid,
-        p_device_id: deviceId
-      });
-      const fila = data && data[0];
+async function identificarComo(personaId){
+  const deviceId = getDeviceId();
+  const { data, error } = await supa.rpc("jprm_identificar_persona", {
+    p_persona_id: personaId,
+    p_device_id: deviceId
+  });
+  const fila = data && data[0];
 
-      if (error || !fila){
-        toast("Tarjeta no reconocida o sin autorización.", "err");
-        return;
-      }
-      if (!fila.telefono_ok){
-        toast("Esta tarjeta ya está vinculada a otro teléfono. Pedile a un administrador que la desvincule.", "err");
-        return;
-      }
-
-      persona = { id: fila.id, nombre: fila.nombre };
-      renderMenuPersona();
-    };
-  } catch(e){
-    toast("No se pudo activar el lector NFC: " + e.message, "err");
+  if (error || !fila){
+    toast("No se pudo identificar. Probá de nuevo.", "err");
+    return;
   }
+  if (!fila.telefono_ok){
+    toast("Esta persona ya está vinculada a otro teléfono. Pedile a un administrador que la desvincule.", "err");
+    return;
+  }
+
+  persona = { id: fila.id, nombre: fila.nombre };
+  guardarPersonaLocal(persona);
+  renderMenuPersona();
 }
 
 // ---------- MENÚ DE LA PERSONA IDENTIFICADA ----------
 function renderMenuPersona(){
   app.innerHTML = `
+    <div class="top-nav">
+      <button class="active" id="nav-home">Inicio</button>
+      <button id="nav-dash">Fichas afuera</button>
+    </div>
     <div class="persona"><b>${persona.nombre}</b><span class="muted">identificado ✓</span></div>
     <button class="btn" id="btn-retiro">📤 Retirar material</button>
     <button class="btn secondary" id="btn-devolucion">📥 Devolver material</button>
-    <button class="btn secondary" id="btn-cancelar">Cancelar</button>
+    <button class="link" id="btn-cambiar">¿No sos vos? Cambiar de usuario en este teléfono</button>
   `;
+  document.getElementById("nav-home").onclick = () => { persona ? renderMenuPersona() : renderIdentificar(); };
+  document.getElementById("nav-dash").onclick = renderDashboard;
   document.getElementById("btn-retiro").onclick = () => iniciarSeleccion("retiro");
   document.getElementById("btn-devolucion").onclick = () => iniciarSeleccion("devolucion");
-  document.getElementById("btn-cancelar").onclick = renderHome;
+  document.getElementById("btn-cambiar").onclick = () => { olvidarPersonaLocal(); renderIdentificar(); };
 }
 
 // ---------- SELECCIÓN DE MATERIAL: búsqueda por LP o nombre ----------
@@ -296,7 +355,7 @@ async function confirmarMovimiento(){
     }
     toast(`${pendientes.length} material(es) registrado(s) como devuelto(s).`, "ok");
   }
-  renderHome();
+  renderMenuPersona();
 }
 
 // ---------- DASHBOARD: material afuera ----------
@@ -308,7 +367,7 @@ async function renderDashboard(){
     </div>
     <div class="card"><p class="muted">Cargando…</p></div>
   `;
-  document.getElementById("nav-home").onclick = renderHome;
+  document.getElementById("nav-home").onclick = () => { persona ? renderMenuPersona() : renderIdentificar(); };
 
   const { data, error } = await supa
     .from("prestamos")
@@ -333,7 +392,7 @@ async function renderDashboard(){
   }).join("");
 }
 
-renderHome();
+init();
 </script>
 </body>
 </html>

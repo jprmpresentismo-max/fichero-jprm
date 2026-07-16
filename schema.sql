@@ -4,15 +4,28 @@
 -- ============================================================
 
 -- Personal autorizado a retirar/devolver material (fichas)
+-- nfc_uid es NULLABLE: se carga primero la nómina oficial (nombre, legajo,
+-- dni, jerarquia) sin tarjeta asignada, y admin.html vincula la tarjeta NFC
+-- más adelante para cada persona (ver migración más abajo).
 create table if not exists personal_autorizado (
   id uuid primary key default gen_random_uuid(),
   nombre text not null,
-  nfc_uid text unique not null,
+  nfc_uid text unique,
   activo boolean not null default true,
   device_token text,               -- identifica el único teléfono vinculado a esta persona
   device_vinculado_en timestamptz, -- cuándo se vinculó ese teléfono
+  legajo text,                     -- LP
+  dni text,
+  jerarquia text,
   creado_en timestamptz not null default now()
 );
+
+-- Migración (segura de correr aunque la tabla ya exista de una versión
+-- anterior donde nfc_uid era NOT NULL y no había legajo/dni/jerarquia):
+alter table personal_autorizado alter column nfc_uid drop not null;
+alter table personal_autorizado add column if not exists legajo text;
+alter table personal_autorizado add column if not exists dni text;
+alter table personal_autorizado add column if not exists jerarquia text;
 
 -- Fichas de pacientes / material (una fila por ficha física)
 create table if not exists fichas (
@@ -130,3 +143,39 @@ end;
 $$;
 
 grant execute on function jprm_identificar(text, text) to anon;
+
+-- ============================================================
+-- Función: identifica a la persona por su ID (elegida por búsqueda de
+-- LP/nombre en app.html, sin tarjeta NFC) y vincula el teléfono desde el
+-- que se identifica por primera vez. Mismo mecanismo de vínculo que
+-- jprm_identificar, pero sin depender de NFC (funciona en Android e iOS).
+-- ============================================================
+create or replace function jprm_identificar_persona(p_persona_id uuid, p_device_id text)
+returns table (id uuid, nombre text, telefono_ok boolean)
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v personal_autorizado;
+begin
+  select * into v from personal_autorizado
+    where personal_autorizado.id = p_persona_id and activo = true
+    limit 1;
+
+  if v.id is null then
+    return; -- persona no encontrada o desactivada: no devuelve filas
+  end if;
+
+  if v.device_token is null then
+    update personal_autorizado
+      set device_token = p_device_id, device_vinculado_en = now()
+      where personal_autorizado.id = v.id;
+    v.device_token := p_device_id;
+  end if;
+
+  return query select v.id, v.nombre, (v.device_token = p_device_id);
+end;
+$$;
+
+grant execute on function jprm_identificar_persona(uuid, text) to anon;

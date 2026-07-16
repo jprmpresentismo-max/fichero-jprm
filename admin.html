@@ -225,44 +225,49 @@ function renderPersonal(){
   const cont = document.getElementById("seccion");
   cont.innerHTML = `
     <div class="card">
-      <p class="muted">Registrá una tarjeta NFC nueva para autorizar a alguien a
-        retirar/devolver material. El teléfono desde el que esa persona use la
-        tarjeta por primera vez queda vinculado automáticamente.</p>
+      <p class="muted">Esta es la nómina de personal autorizado a retirar
+        material. Cada persona vincula su propio teléfono la primera vez que
+        entra a <b>app.html</b> y se busca a sí misma en la lista (funciona
+        en Android e iOS, no hace falta tarjeta ni escaneo). Desde acá solo
+        gestionás quién está autorizado y podés desvincular un teléfono si
+        alguien cambia de celular.</p>
+      <p class="muted">¿Falta alguien en la lista? Agregalo acá:</p>
       <input type="text" id="in-nombre-p" placeholder="Nombre y apellido">
-      <button class="btn warn" id="btn-registrar">📡 Escanear y registrar tarjeta</button>
+      <input type="text" id="in-legajo-p" placeholder="LP (opcional)">
+      <button class="btn secondary" id="btn-agregar-persona">+ Agregar a la lista</button>
     </div>
-    <p class="muted">Personal autorizado:</p>
+    <input type="text" id="in-buscar-personal" placeholder="Buscar por LP o nombre...">
     <div id="lista-personal"><p class="muted">Cargando…</p></div>
   `;
-  document.getElementById("btn-registrar").onclick = async () => {
+  document.getElementById("btn-agregar-persona").onclick = async () => {
     const nombre = document.getElementById("in-nombre-p").value.trim();
+    const legajo = document.getElementById("in-legajo-p").value.trim();
     if (!nombre){ toast("Escribí el nombre primero.", "err"); return; }
-    leerNFCParaAlta(async (uid) => {
-      const { error } = await supa.from("personal_autorizado").insert({ nombre, nfc_uid: uid });
-      if (error){ toast("Error: " + error.message, "err"); return; }
-      toast(`Tarjeta registrada para ${nombre}.`, "ok");
-      document.getElementById("in-nombre-p").value = "";
-      cargarListaPersonal();
-    });
+    const { error } = await supa.from("personal_autorizado").insert({ nombre, legajo: legajo || null });
+    if (error){ toast("Error: " + error.message, "err"); return; }
+    toast(`${nombre} agregado a la lista.`, "ok");
+    document.getElementById("in-nombre-p").value = "";
+    document.getElementById("in-legajo-p").value = "";
+    cargarListaPersonal();
   };
+  document.getElementById("in-buscar-personal").addEventListener("input", debounce((e) => cargarListaPersonal(e.target.value.trim()), 300));
   cargarListaPersonal();
 }
 
-async function cargarListaPersonal(){
+async function cargarListaPersonal(filtro){
   const cont = document.getElementById("lista-personal");
-  const { data, error } = await supa
-    .from("personal_autorizado")
-    .select("*")
-    .order("creado_en", { ascending: true });
+  let query = supa.from("personal_autorizado").select("*").order("nombre", { ascending: true });
+  if (filtro){ query = query.or(`legajo.ilike.%${filtro}%,nombre.ilike.%${filtro}%`); }
+  const { data, error } = await query;
 
   if (error){ cont.innerHTML = `<p class="muted">Error: ${error.message}</p>`; return; }
-  if (!data.length){ cont.innerHTML = `<p class="muted">Todavía no hay nadie registrado.</p>`; return; }
+  if (!data.length){ cont.innerHTML = `<p class="muted">${filtro ? "Sin resultados." : "Todavía no hay nadie cargado."}</p>`; return; }
 
   cont.innerHTML = data.map(p => `
     <div class="item" style="border-left-color:${p.activo ? "var(--ok)" : "var(--line)"};">
       <div>
         <b>${p.nombre}</b>
-        <small>NFC ${p.nfc_uid}</small>
+        <small>${[p.legajo ? "LP " + p.legajo : null, p.jerarquia || null].filter(Boolean).join(" · ")}</small>
         <small>${p.device_token ? "Teléfono vinculado" : "Sin teléfono vinculado todavía"}</small>
       </div>
       <div class="acciones">
@@ -279,7 +284,7 @@ async function cargarListaPersonal(){
       const nuevoEstado = el.dataset.activo !== "true";
       const { error } = await supa.from("personal_autorizado").update({ activo: nuevoEstado }).eq("id", el.dataset.id);
       if (error){ toast("Error: " + error.message, "err"); return; }
-      cargarListaPersonal();
+      cargarListaPersonal(document.getElementById("in-buscar-personal").value.trim());
     };
   });
   cont.querySelectorAll("[data-accion='desvincular']").forEach(el => {
@@ -288,25 +293,10 @@ async function cargarListaPersonal(){
         .update({ device_token: null, device_vinculado_en: null })
         .eq("id", el.dataset.id);
       if (error){ toast("Error: " + error.message, "err"); return; }
-      toast("Teléfono desvinculado. Se vinculará de nuevo con el próximo uso de la tarjeta.", "ok");
-      cargarListaPersonal();
+      toast("Teléfono desvinculado. La persona se puede volver a identificar en app.html desde otro celular.", "ok");
+      cargarListaPersonal(document.getElementById("in-buscar-personal").value.trim());
     };
   });
-}
-
-async function leerNFCParaAlta(callback){
-  if (!("NDEFReader" in window)){
-    toast("Este navegador no soporta NFC. Usá Chrome en Android.", "err");
-    return;
-  }
-  try{
-    const reader = new NDEFReader();
-    await reader.scan();
-    toast("Acercá la tarjeta al dorso del teléfono…", "ok");
-    reader.onreading = (event) => callback(event.serialNumber);
-  } catch(e){
-    toast("No se pudo activar el lector NFC: " + e.message, "err");
-  }
 }
 
 init();
