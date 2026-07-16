@@ -95,15 +95,64 @@ function codigoUnico(){
 }
 
 // ---------- ARRANQUE / SESIÓN ----------
+// Si el link viene de una invitación o de "olvidé mi contraseña", Supabase
+// agrega #type=invite o #type=recovery a la URL. En ese caso, en vez de ir
+// directo al panel, se pide elegir una contraseña nueva.
+let modoElegirPassword = false;
+// Se lee el hash apenas arranca el script, ANTES de crear el cliente de
+// Supabase: supabase-js procesa y borra el hash de la URL apenas se
+// inicializa, así que si lo leyéramos más tarde podríamos llegar tarde.
+const hashInicial = new URLSearchParams(
+  window.location.hash.startsWith("#") ? window.location.hash.slice(1) : window.location.hash
+);
+if (hashInicial.get("type") === "invite" || hashInicial.get("type") === "recovery"){
+  modoElegirPassword = true;
+}
+
 async function init(){
+  supa.auth.onAuthStateChange((_event, s) => {
+    session = s;
+    // PASSWORD_RECOVERY es el evento que dispara supabase-js cuando el link
+    // de "olvidé mi contraseña" (o invitación) se procesó correctamente.
+    if (_event === "PASSWORD_RECOVERY"){ modoElegirPassword = true; }
+    if (session && window.location.hash) history.replaceState(null, "", window.location.pathname);
+    render();
+  });
+
   const { data } = await supa.auth.getSession();
   session = data.session;
-  supa.auth.onAuthStateChange((_event, s) => { session = s; render(); });
   render();
 }
 
 function render(){
-  if (!session){ renderLogin(); } else { renderPanel(); }
+  if (!session){ renderLogin(); return; }
+  if (modoElegirPassword){ renderElegirPassword(); return; }
+  renderPanel();
+}
+
+// ---------- ELEGIR CONTRASEÑA (primer ingreso por invitación) ----------
+function renderElegirPassword(){
+  app.innerHTML = `
+    <div class="card">
+      <p class="muted">Bienvenido/a. Antes de entrar, elegí tu contraseña para este panel.</p>
+      <input type="password" id="in-pass1" placeholder="Nueva contraseña (mínimo 6 caracteres)">
+      <input type="password" id="in-pass2" placeholder="Repetí la contraseña">
+      <button class="btn" id="btn-set-pass">Guardar contraseña y entrar</button>
+      <p class="muted" id="status-pass"></p>
+    </div>
+  `;
+  document.getElementById("btn-set-pass").onclick = async () => {
+    const p1 = document.getElementById("in-pass1").value;
+    const p2 = document.getElementById("in-pass2").value;
+    const status = document.getElementById("status-pass");
+    if (!p1 || p1.length < 6){ status.textContent = "La contraseña tiene que tener al menos 6 caracteres."; return; }
+    if (p1 !== p2){ status.textContent = "Las contraseñas no coinciden."; return; }
+    status.textContent = "Guardando…";
+    const { error } = await supa.auth.updateUser({ password: p1 });
+    if (error){ status.textContent = "Error: " + error.message; return; }
+    modoElegirPassword = false;
+    render();
+  };
 }
 
 // ---------- LOGIN ----------
@@ -115,6 +164,9 @@ function renderLogin(){
       <input type="password" id="in-pass" placeholder="Contraseña">
       <button class="btn" id="btn-login">Ingresar</button>
       <p class="muted" id="status-login"></p>
+      <p class="muted" style="text-align:center;">
+        <a href="#" id="link-olvide" style="color:var(--accent);">¿Olvidaste tu contraseña o es tu primer ingreso?</a>
+      </p>
     </div>
   `;
   document.getElementById("btn-login").onclick = async () => {
@@ -126,6 +178,18 @@ function renderLogin(){
     const { error } = await supa.auth.signInWithPassword({ email, password });
     if (error){ status.textContent = "Error: " + error.message; return; }
     status.textContent = "";
+  };
+  document.getElementById("link-olvide").onclick = async (e) => {
+    e.preventDefault();
+    const email = document.getElementById("in-email").value.trim();
+    const status = document.getElementById("status-login");
+    if (!email){ status.textContent = "Escribí tu email arriba y tocá el link de nuevo."; return; }
+    status.textContent = "Enviando…";
+    const { error } = await supa.auth.resetPasswordForEmail(email, {
+      redirectTo: window.location.origin + window.location.pathname
+    });
+    if (error){ status.textContent = "Error: " + error.message; return; }
+    status.textContent = "Te enviamos un mail para elegir tu contraseña. Revisá tu casilla.";
   };
 }
 
@@ -261,39 +325,38 @@ async function cargarListaPersonal(filtro){
   const { data, error } = await query;
 
   if (error){ cont.innerHTML = `<p class="muted">Error: ${error.message}</p>`; return; }
-  if (!data.length){ cont.innerHTML = `<p class="muted">${filtro ? "Sin resultados." : "Todavía no hay nadie cargado."}</p>`; return; }
-
+  if (!data.length){ cont.innerHTML = `<p class="muted">Todavía no hay nadie cargado.</p>`; return; }
   cont.innerHTML = data.map(p => `
-    <div class="item" style="border-left-color:${p.activo ? "var(--ok)" : "var(--line)"};">
+    <div class="item">
       <div>
         <b>${p.nombre}</b>
-        <small>${[p.legajo ? "LP " + p.legajo : null, p.jerarquia || null].filter(Boolean).join(" · ")}</small>
-        <small>${p.device_token ? "Teléfono vinculado" : "Sin teléfono vinculado todavía"}</small>
+        <small>LP ${p.legajo || "-"}${p.device_token ? " · 📱 teléfono vinculado" : " · sin teléfono vinculado"}</small>
       </div>
       <div class="acciones">
-        <span class="badge ${p.activo ? "" : "off"}" data-accion="activo" data-id="${p.id}" data-activo="${p.activo}">
-          ${p.activo ? "Autorizado" : "Desactivado"}
-        </span>
-        ${p.device_token ? `<span class="badge off" data-accion="desvincular" data-id="${p.id}">Desvincular tel.</span>` : ""}
+        <span class="badge${p.activo ? "" : " off"}" data-id="${p.id}" data-activo="${p.activo}">${p.activo ? "Activo" : "Inactivo"}</span>
+        ${p.device_token ? `<button class="btn secondary" style="width:auto; padding:6px 10px; margin:0; font-size:.8rem;" data-desvincular="${p.id}">Desvincular tel.</button>` : ""}
       </div>
     </div>
   `).join("");
 
-  cont.querySelectorAll("[data-accion='activo']").forEach(el => {
-    el.onclick = async () => {
-      const nuevoEstado = el.dataset.activo !== "true";
-      const { error } = await supa.from("personal_autorizado").update({ activo: nuevoEstado }).eq("id", el.dataset.id);
+  cont.querySelectorAll(".badge").forEach(b => {
+    b.onclick = async () => {
+      const id = b.dataset.id;
+      const nuevoEstado = !(b.dataset.activo === "true");
+      const { error } = await supa.from("personal_autorizado").update({ activo: nuevoEstado }).eq("id", id);
       if (error){ toast("Error: " + error.message, "err"); return; }
       cargarListaPersonal(document.getElementById("in-buscar-personal").value.trim());
     };
   });
-  cont.querySelectorAll("[data-accion='desvincular']").forEach(el => {
-    el.onclick = async () => {
+
+  cont.querySelectorAll("[data-desvincular]").forEach(b => {
+    b.onclick = async () => {
+      const id = b.dataset.desvincular;
       const { error } = await supa.from("personal_autorizado")
         .update({ device_token: null, device_vinculado_en: null })
-        .eq("id", el.dataset.id);
+        .eq("id", id);
       if (error){ toast("Error: " + error.message, "err"); return; }
-      toast("Teléfono desvinculado. La persona se puede volver a identificar en app.html desde otro celular.", "ok");
+      toast("Teléfono desvinculado.", "ok");
       cargarListaPersonal(document.getElementById("in-buscar-personal").value.trim());
     };
   });
